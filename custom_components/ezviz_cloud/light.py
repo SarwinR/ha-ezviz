@@ -33,6 +33,19 @@ async def async_setup_entry(
         DATA_COORDINATOR
     ]
 
+    # log the number of lights found in the log
+    num_lights = sum(
+        1
+        for camera in coordinator.data
+        if SupportExt.SupportAlarmLight.value in coordinator.data[camera]["supportExt"]
+        and coordinator.data[camera]["supportExt"][SupportExt.SupportAlarmLight.value]
+        == "1"
+    )
+    
+    raise NotImplementedError(
+        f"Number of lights found: {num_lights}"
+    )
+
     async_add_entities(
         EzvizLight(coordinator, camera)
         for camera in coordinator.data
