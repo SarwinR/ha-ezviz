@@ -1,7 +1,9 @@
-"""Support for EZVIZ sensors."""
+"""Support for EZVIZ firmware updates."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from pyezvizapi import HTTPError, PyEzvizError
@@ -23,27 +25,49 @@ from .entity import EzvizEntity
 
 PARALLEL_UPDATES = 1
 
-UPDATE_ENTITY_TYPES = UpdateEntityDescription(
-    key="version",
-    device_class=UpdateDeviceClass.FIRMWARE,
+@dataclass(frozen=True, kw_only=True)
+class EzvizUpdateEntityDescription(UpdateEntityDescription):
+    """EZVIZ update entity description with optional support predicate."""
+
+    is_supported_fn: Callable[[dict[str, Any]], bool] | None = None
+
+
+def _is_desc_supported(
+    camera_data: dict[str, Any], description: EzvizUpdateEntityDescription
+) -> bool:
+    """Return True when the update description is supported for the camera."""
+
+    if description.is_supported_fn is None:
+        return True
+    return description.is_supported_fn(camera_data)
+
+
+UPDATE_ENTITY_DESCRIPTIONS: tuple[EzvizUpdateEntityDescription, ...] = (
+    EzvizUpdateEntityDescription(
+        key="version",
+        device_class=UpdateDeviceClass.FIRMWARE,
+        is_supported_fn=lambda data: isinstance(data.get("version"), str)
+        and bool(data.get("version")),
+    ),
 )
 
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    """Set up EZVIZ sensors based on a config entry."""
+    """Set up EZVIZ update entities based on a config entry."""
     coordinator: EzvizDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id][
         DATA_COORDINATOR
     ]
 
-    async_add_entities(
-        EzvizUpdateEntity(coordinator, camera, sensor, UPDATE_ENTITY_TYPES)
-        for camera in coordinator.data
-        for sensor, value in coordinator.data[camera].items()
-        if sensor in UPDATE_ENTITY_TYPES.key
-        if value
-    )
+    entities = [
+        EzvizUpdateEntity(coordinator, serial, description)
+        for serial, camera_data in coordinator.data.items()
+        for description in UPDATE_ENTITY_DESCRIPTIONS
+        if _is_desc_supported(camera_data, description)
+    ]
+
+    async_add_entities(entities)
 
 
 class EzvizUpdateEntity(EzvizEntity, UpdateEntity):
@@ -59,18 +83,20 @@ class EzvizUpdateEntity(EzvizEntity, UpdateEntity):
         self,
         coordinator: EzvizDataUpdateCoordinator,
         serial: str,
-        sensor: str,
-        description: UpdateEntityDescription,
+        description: EzvizUpdateEntityDescription,
     ) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator, serial)
-        self._attr_unique_id = f"{serial}_{sensor}"
+        self._attr_unique_id = f"{serial}_{description.key}"
         self.entity_description = description
 
     @property
     def installed_version(self) -> str | None:
         """Version installed and in use."""
-        return self.data["version"]
+        version = self.data.get("version")
+        if isinstance(version, str):
+            return version
+        return None
 
     @property
     def in_progress(self) -> bool:
@@ -80,22 +106,33 @@ class EzvizUpdateEntity(EzvizEntity, UpdateEntity):
     @property
     def latest_version(self) -> str | None:
         """Latest version available for install."""
-        if self.data["upgrade_available"]:
-            return self.data["latest_firmware_info"]["version"]
+        if self.data.get("upgrade_available"):
+            latest_info = self.data.get("latest_firmware_info")
+            if isinstance(latest_info, dict):
+                version = latest_info.get("version")
+                if isinstance(version, str):
+                    return version
 
         return self.installed_version
 
     def release_notes(self) -> str | None:
         """Return full release notes."""
-        if self.data["latest_firmware_info"]:
-            return self.data["latest_firmware_info"].get("desc")
+        latest_info = self.data.get("latest_firmware_info")
+        if isinstance(latest_info, dict):
+            desc = latest_info.get("desc")
+            if isinstance(desc, str):
+                return desc
         return None
 
     @property
     def update_percentage(self) -> int | None:
         """Update installation progress."""
-        if self.data["upgrade_in_progress"]:
-            return self.data["upgrade_percent"]
+        if self.data.get("upgrade_in_progress"):
+            percent = self.data.get("upgrade_percent")
+            if isinstance(percent, int):
+                return percent
+            if isinstance(percent, float):
+                return int(percent)
         return None
 
     async def async_install(
